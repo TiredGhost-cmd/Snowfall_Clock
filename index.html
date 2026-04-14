@@ -32,58 +32,157 @@ const DIGITS = {
   ' ':['     ','     ','     ','     ','     ','     ','     '],
 };
 
-const FLAKES   = ['*', '+', '-', '.', "'", '"', 'x'];
+const FLAKES  = ['*', '+', '-', '.', "'", '"', 'x'];
 const DR = 7, DC = 5;
-const CHAR_GW  = DC + 1;   // 5 digit cols + 1 gap = 6 grid units per character
-const PILE_MS  = 10000;     // ms before a piled flake fades
-const FADE_MS  = 5000;
-const MAX_SNOW = 90;
+const CHAR_GW = DC + 1;
+const PILE_MS = 10000;
+const FADE_MS = 5000;
 
-// ── Layout state ───────────────────────────────────────────────────────────
+// ── State ──────────────────────────────────────────────────────────────────
 let CELL, gridW, gridH;
-let solidGrid;   // Uint8Array[gridH][gridW]  — 1 = digit segment
-let pileGrid;    // Array[gridH][gridW]        — null | {char,alpha,born}
-let clockGX, clockGY;  // clock top-left in grid coords
-let lastSec = -1;
+let solidGrid, pileGrid;
+let clockGX, clockGY;
+let lastSec   = -1;
+let lastSpawn = 0;
 
-function getTimeString() {
-  const n = new Date();
-  return String(n.getHours()).padStart(2,'0')   + ':' +
-         String(n.getMinutes()).padStart(2,'0') + ':' +
+// ── Weather ────────────────────────────────────────────────────────────────
+const wx = { temp: null, desc: 'Loading...', unit: '°F' };
+
+function wmoDesc(code) {
+  if (code === 0)              return 'Clear';
+  if (code <= 3)               return 'Cloudy';
+  if (code <= 48)              return 'Foggy';
+  if (code <= 55)              return 'Drizzle';
+  if (code <= 65)              return 'Rain';
+  if (code <= 77)              return 'Snow';
+  if (code <= 82)              return 'Showers';
+  if (code <= 86)              return 'Snow Showers';
+  return 'Stormy';
+}
+
+async function fetchWeather() {
+  try {
+    const pos = await new Promise((res, rej) =>
+      navigator.geolocation.getCurrentPosition(res, rej, { timeout: 8000 }));
+    const { latitude: lat, longitude: lon } = pos.coords;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`;
+    const d   = await (await fetch(url)).json();
+    wx.temp   = Math.round(d.current.temperature_2m);
+    wx.desc   = wmoDesc(d.current.weather_code);
+  } catch {
+    wx.temp = '--';
+    wx.desc = 'Unavailable';
+  }
+}
+fetchWeather();
+setInterval(fetchWeather, 10 * 60 * 1000); // refresh every 10 min
+
+// ── Snow density ───────────────────────────────────────────────────────────
+function snowMultiplier() {
+  const mo = new Date().getMonth();   // 0–11
+  const hr = new Date().getHours();
+  let m = 1.0;
+  if (mo === 11 || mo <= 1)           m *= 1.6;  // Dec–Feb heavy
+  else if (mo >= 4 && mo <= 8)        m *= 0.55; // May–Sep light
+  if (hr < 6)                         m *= 1.5;  // midnight–6am boost
+  if (blizzard.active)                m *= 3.5;
+  return m;
+}
+function maxSnow()   { return Math.round(90 * snowMultiplier()); }
+function spawnMs()   { return Math.round(60  / snowMultiplier()); }
+
+// ── Gale ──────────────────────────────────────────────────────────────────
+const GALE_DIRS = [
+  { dx:-1, dy:-1 }, // 10 o'clock UpLeft
+  { dx:-1, dy: 0 }, //  9 o'clock Left
+  { dx: 1, dy:-1 }, //  2 o'clock UpRight
+  { dx: 1, dy: 0 }, //  3 o'clock Right
+];
+const gale = { active:false, dx:0, dy:0, strength:0, endsAt:0, fadeAt:0 };
+let nextGaleCheck = 5000;
+
+function updateGale(now) {
+  if (gale.active && now > gale.endsAt) {
+    gale.active    = false;
+    nextGaleCheck  = now + 8000 + Math.random() * 12000;
+  }
+  if (!gale.active && now > nextGaleCheck) {
+    if (Math.random() < 0.35) {
+      const dir      = GALE_DIRS[Math.floor(Math.random() * GALE_DIRS.length)];
+      const duration = 3000 + Math.random() * 6000;
+      gale.active    = true;
+      gale.dx        = dir.dx;
+      gale.dy        = dir.dy;
+      gale.strength  = 0.3 + Math.random() * 0.5;
+      gale.endsAt    = now + duration;
+      gale.fadeAt    = now + duration * 0.7;
+    } else {
+      nextGaleCheck  = now + 4000 + Math.random() * 8000;
+    }
+  }
+}
+
+function galeStr(now) {
+  if (!gale.active) return 0;
+  if (now < gale.fadeAt) return gale.strength;
+  const t = (now - gale.fadeAt) / (gale.endsAt - gale.fadeAt);
+  return gale.strength * Math.max(0, 1 - t);
+}
+
+// ── Blizzard ───────────────────────────────────────────────────────────────
+const blizzard = { active:false, endsAt:0 };
+let nextBlizzardCheck = 30000;
+
+function updateBlizzard(now) {
+  if (blizzard.active && now > blizzard.endsAt) {
+    blizzard.active = false;
+    nextBlizzardCheck = now + 45000 + Math.random() * 60000;
+  }
+  if (!blizzard.active && now > nextBlizzardCheck) {
+    if (Math.random() < 0.08) {
+      blizzard.active = true;
+      blizzard.endsAt = now + 10000 + Math.random() * 5000;
+    } else {
+      nextBlizzardCheck = now + 20000 + Math.random() * 40000;
+    }
+  }
+}
+
+// ── Layout ─────────────────────────────────────────────────────────────────
+function getTimeString(sec) {
+  const n   = new Date();
+  const h   = n.getHours();
+  const col = sec % 2 === 0 ? ':' : ' ';
+  return String(h).padStart(2,'0') + col +
+         String(n.getMinutes()).padStart(2,'0') + col +
          String(n.getSeconds()).padStart(2,'0');
 }
 
 function setup() {
   canvas.width  = window.innerWidth;
   canvas.height = window.innerHeight;
-
-  CELL  = Math.max(8, Math.min(Math.floor(canvas.width / 58), 14));
-  gridW = Math.ceil(canvas.width  / CELL) + 2;
-  gridH = Math.ceil(canvas.height / CELL) + 2;
-
-  solidGrid = Array.from({length: gridH}, () => new Uint8Array(gridW));
-  pileGrid  = Array.from({length: gridH}, () => new Array(gridW).fill(null));
-
-  // Snap clock origin to grid
-  const time   = getTimeString();
-  const totalGW = time.length * CHAR_GW - 1;
+  CELL   = Math.max(8, Math.min(Math.floor(canvas.width / 58), 14));
+  gridW  = Math.ceil(canvas.width  / CELL) + 2;
+  gridH  = Math.ceil(canvas.height / CELL) + 2;
+  solidGrid = Array.from({length:gridH}, () => new Uint8Array(gridW));
+  pileGrid  = Array.from({length:gridH}, () => new Array(gridW).fill(null));
+  const sample  = getTimeString(0);
+  const totalGW = sample.length * CHAR_GW - 1;
   clockGX = Math.round((gridW - totalGW) / 2);
-  clockGY = Math.round(gridH * 0.50);
-
-  rebuildSolid();
+  clockGY = Math.round(gridH * 0.45);
+  rebuildSolid(0);
 }
 setup();
 window.addEventListener('resize', setup);
 
 // ── Solid grid ─────────────────────────────────────────────────────────────
-function rebuildSolid() {
+function rebuildSolid(sec) {
   for (let r = 0; r < gridH; r++) solidGrid[r].fill(0);
-
-  const time = getTimeString();
+  const time = getTimeString(sec);
   for (let ci = 0; ci < time.length; ci++) {
     const pat = DIGITS[time[ci]] || DIGITS[' '];
     for (let row = 0; row < DR; row++) {
-      for (let col = 0; col < pat[row].length; col++) {
+      for (let col = 0; col < (pat[row]||'').length; col++) {
         if (pat[row][col] === '*') {
           const gx = clockGX + ci * CHAR_GW + col;
           const gy = clockGY + row;
@@ -93,63 +192,152 @@ function rebuildSolid() {
       }
     }
   }
-
-  // Clear any piles that are now inside a solid cell
   for (let gy = 0; gy < gridH; gy++)
     for (let gx = 0; gx < gridW; gx++)
       if (solidGrid[gy][gx] && pileGrid[gy][gx]) pileGrid[gy][gx] = null;
 }
 
-// ── Collision ──────────────────────────────────────────────────────────────
+// ── Collision — sides are OPEN ─────────────────────────────────────────────
 function isBlocked(gx, gy) {
-  if (gy >= gridH) return true;          // floor
-  if (gx < 0 || gx >= gridW) return true; // walls
-  if (gy < 0) return false;
+  if (gy >= gridH) return true;
+  if (gy < 0)      return false;
+  if (gx < 0 || gx >= gridW) return false;  // no walls
   return solidGrid[gy][gx] === 1 || pileGrid[gy][gx] !== null;
 }
 
 // ── Re-evaluate piles after digit change ───────────────────────────────────
-// Process bottom-to-top so cascade works correctly
 function evalPiles() {
   for (let gy = gridH - 1; gy >= 0; gy--) {
     for (let gx = 0; gx < gridW; gx++) {
       const p = pileGrid[gy][gx];
       if (!p) continue;
-      // Still supported?
       if (!isBlocked(gx, gy + 1)) {
-        flakes.push({
-          gx, gy,
-          char: p.char, alpha: p.alpha,
-          ticker: 0,
-          rate: 18 + Math.floor(Math.random() * 18),
-          glitchCD: 0,
-        });
+        flakes.push({ gx, gy, char:p.char, alpha:p.alpha,
+          ticker:0, rate:20+Math.floor(Math.random()*20), glitchCD:0 });
         pileGrid[gy][gx] = null;
       }
     }
   }
 }
 
-// ── Falling flakes ─────────────────────────────────────────────────────────
+// ── Flakes ─────────────────────────────────────────────────────────────────
 const flakes = [];
 
-setInterval(() => {
-  if (flakes.length < MAX_SNOW) {
-    flakes.push({
-      gx:       Math.floor(Math.random() * gridW),
-      gy:       -1,
-      char:     FLAKES[Math.floor(Math.random() * FLAKES.length)],
-      alpha:    0.5 + Math.random() * 0.4,
-      ticker:   0,
-      rate:     14 + Math.floor(Math.random() * 14),
-      glitchCD: 0,
-    });
-  }
-}, 90);
+function spawnFlake() {
+  flakes.push({
+    gx:       Math.floor(Math.random() * gridW),
+    gy:       -1,
+    char:     FLAKES[Math.floor(Math.random() * FLAKES.length)],
+    alpha:    0.5 + Math.random() * 0.4,
+    ticker:   0,
+    rate:     20 + Math.floor(Math.random() * 20),
+    glitchCD: 0,
+  });
+}
 
-// ── Clock draw ─────────────────────────────────────────────────────────────
-function drawClock() {
-  const time = getTimeString();
+// ── Draw analog clock ──────────────────────────────────────────────────────
+function drawAnalogClock(now) {
+  const cx = 72, cy = 72, r = 48;
+  const t  = new Date();
+  const ms = t.getMilliseconds();
+  const h  = t.getHours() % 12 + t.getMinutes() / 60 + t.getSeconds() / 3600;
+  const m  = t.getMinutes() + t.getSeconds() / 60;
+  const s  = t.getSeconds() + ms / 1000;
+
+  ctx.save();
+
+  // Face
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(190,225,255,0.35)';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  // Subtle fill
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(5,10,30,0.5)';
+  ctx.fill();
+
+  // Tick marks
+  for (let i = 0; i < 60; i++) {
+    const a      = (i / 60) * Math.PI * 2 - Math.PI / 2;
+    const isHour = i % 5 === 0;
+    const inner  = isHour ? r - 9 : r - 5;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+    ctx.lineTo(cx + Math.cos(a) * r,     cy + Math.sin(a) * r);
+    ctx.strokeStyle = isHour ? 'rgba(190,225,255,0.75)' : 'rgba(190,225,255,0.2)';
+    ctx.lineWidth   = isHour ? 1.5 : 0.8;
+    ctx.stroke();
+  }
+
+  // Hour hand
+  const ha = (h / 12) * Math.PI * 2 - Math.PI / 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(ha) * 8, cy - Math.sin(ha) * 8);
+  ctx.lineTo(cx + Math.cos(ha) * r * 0.52, cy + Math.sin(ha) * r * 0.52);
+  ctx.strokeStyle = 'rgba(190,225,255,0.95)';
+  ctx.lineWidth   = 3;
+  ctx.lineCap     = 'round';
+  ctx.stroke();
+
+  // Minute hand
+  const ma = (m / 60) * Math.PI * 2 - Math.PI / 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(ma) * 10, cy - Math.sin(ma) * 10);
+  ctx.lineTo(cx + Math.cos(ma) * r * 0.76, cy + Math.sin(ma) * r * 0.76);
+  ctx.strokeStyle = 'rgba(190,225,255,0.85)';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+
+  // Second hand
+  const sa = (s / 60) * Math.PI * 2 - Math.PI / 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(sa) * 14, cy - Math.sin(sa) * 14);
+  ctx.lineTo(cx + Math.cos(sa) * r * 0.88, cy + Math.sin(sa) * r * 0.88);
+  ctx.strokeStyle = 'rgba(80,170,255,1)';
+  ctx.lineWidth   = 1;
+  ctx.stroke();
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(190,225,255,1)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ── Draw weather top-right ─────────────────────────────────────────────────
+function drawWeather() {
+  ctx.save();
+  ctx.textAlign   = 'right';
+  ctx.shadowBlur  = 10;
+  ctx.shadowColor = 'rgba(140,200,255,0.5)';
+
+  const x = canvas.width - 22;
+
+  ctx.font      = 'bold 22px monospace';
+  ctx.fillStyle = 'rgba(190,225,255,0.9)';
+  ctx.fillText(wx.temp !== null ? `${wx.temp}${wx.unit}` : '--', x, 38);
+
+  ctx.font      = '13px monospace';
+  ctx.fillStyle = 'rgba(190,225,255,0.6)';
+  ctx.fillText(wx.desc, x, 58);
+
+  if (blizzard.active) {
+    ctx.font      = 'bold 11px monospace';
+    ctx.fillStyle = 'rgba(140,200,255,0.9)';
+    ctx.fillText('!! BLIZZARD !!', x, 76);
+  }
+
+  ctx.restore();
+}
+
+// ── Draw clock digits ──────────────────────────────────────────────────────
+function drawClock(sec) {
+  const time = getTimeString(sec);
   ctx.save();
   ctx.font        = `bold ${CELL}px monospace`;
   ctx.textAlign   = 'left';
@@ -157,10 +345,12 @@ function drawClock() {
   ctx.shadowColor = 'rgba(140,200,255,0.6)';
 
   for (let ci = 0; ci < time.length; ci++) {
-    const pat  = DIGITS[time[ci]] || DIGITS[' '];
-    const bx   = (clockGX + ci * CHAR_GW) * CELL;
+    const ch  = time[ci];
+    if (ch === ' ') continue; // colon flicker — skip space
+    const pat = DIGITS[ch] || DIGITS[' '];
+    const bx  = (clockGX + ci * CHAR_GW) * CELL;
     for (let row = 0; row < DR; row++) {
-      for (let col = 0; col < pat[row].length; col++) {
+      for (let col = 0; col < (pat[row]||'').length; col++) {
         if (pat[row][col] === '*') {
           ctx.fillStyle = `rgba(190,225,255,${0.75 + Math.random() * 0.25})`;
           ctx.fillText('*', bx + col * CELL, (clockGY + row) * CELL);
@@ -171,20 +361,61 @@ function drawClock() {
   ctx.restore();
 }
 
+// ── Gale vignette ──────────────────────────────────────────────────────────
+function drawGaleVignette(gs) {
+  if (gs <= 0) return;
+  // Pulse alpha slightly
+  const pulse = gs * (0.85 + 0.15 * Math.sin(Date.now() / 180));
+  const grad  = ctx.createRadialGradient(
+    canvas.width/2, canvas.height/2, canvas.height * 0.25,
+    canvas.width/2, canvas.height/2, canvas.width  * 0.85
+  );
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, `rgba(20,60,140,${pulse * 0.35})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Wind direction arrow hint — subtle text
+  if (gs > 0.4) {
+    const arrows = { '-1,-1':'↖', '-1,0':'←', '1,-1':'↗', '1,0':'→' };
+    const key    = `${gale.dx},${gale.dy}`;
+    const arrow  = arrows[key] || '';
+    ctx.save();
+    ctx.font      = `${Math.round(16 + gs * 12)}px monospace`;
+    ctx.fillStyle = `rgba(140,190,255,${gs * 0.5})`;
+    ctx.textAlign = 'center';
+    ctx.fillText(arrow, canvas.width / 2, canvas.height - 30);
+    ctx.restore();
+  }
+}
+
 // ── Main loop ──────────────────────────────────────────────────────────────
 function draw(now) {
   const sec = new Date().getSeconds();
   if (sec !== lastSec) {
     lastSec = sec;
-    rebuildSolid();
+    rebuildSolid(sec);
     evalPiles();
+  }
+
+  updateGale(now);
+  updateBlizzard(now);
+  const gs = galeStr(now);
+
+  // Spawn flakes on dynamic rate
+  if (now - lastSpawn > spawnMs() && flakes.length < maxSnow()) {
+    spawnFlake();
+    lastSpawn = now;
   }
 
   // Background fade
   ctx.fillStyle = 'rgba(5,10,20,0.22)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // ── Update + draw falling flakes ────────────────────────────────────────
+  // ── Gale vignette behind snow ──────────────────────────────────────────
+  drawGaleVignette(gs);
+
+  // ── Falling flakes ────────────────────────────────────────────────────
   ctx.font      = `${CELL}px monospace`;
   ctx.textAlign = 'left';
 
@@ -195,47 +426,77 @@ function draw(now) {
     if (f.ticker >= f.rate) {
       f.ticker = 0;
 
-      const canDown  = !isBlocked(f.gx,     f.gy + 1);
-      const canDownL = !isBlocked(f.gx - 1, f.gy + 1);
-      const canDownR = !isBlocked(f.gx + 1, f.gy + 1);
+      const galePush = gale.active && Math.random() < gs;
+      let moved = false;
 
-      if (canDown) {
-        // Straight down — gravity wins
-        f.gy++;
-      } else if (canDownL && canDownR) {
-        // Both diagonals open — pick randomly (slide off round tops)
-        f.gx += Math.random() < 0.5 ? -1 : 1;
-        f.gy++;
-      } else if (canDownL) {
-        f.gx--; f.gy++;
-      } else if (canDownR) {
-        f.gx++; f.gy++;
-      } else {
-        // Fully blocked — pile here
-        if (f.gy >= 0 && f.gy < gridH && f.gx >= 0 && f.gx < gridW) {
-          pileGrid[f.gy][f.gx] = { char: f.char, alpha: f.alpha, born: now };
+      if (galePush) {
+        const tx = f.gx + gale.dx;
+        const ty = f.gy + (gale.dy !== 0 ? gale.dy : 1);
+        if (!isBlocked(tx, ty)) {
+          f.gx = tx; f.gy = ty; moved = true;
+        } else if (gale.dy < 0 && !isBlocked(tx, f.gy)) {
+          f.gx = tx; moved = true;
         }
-        flakes.splice(i, 1);
-        continue;
       }
 
-      // Occasional char glitch (digital noise)
+      if (!moved) {
+        const canDown  = !isBlocked(f.gx,     f.gy + 1);
+        const canDownL = !isBlocked(f.gx - 1, f.gy + 1);
+        const canDownR = !isBlocked(f.gx + 1, f.gy + 1);
+
+        if (canDown) {
+          f.gy++;
+        } else if (canDownL && canDownR) {
+          f.gx += Math.random() < 0.5 ? -1 : 1;
+          f.gy++;
+        } else if (canDownL) {
+          f.gx--; f.gy++;
+        } else if (canDownR) {
+          f.gx++; f.gy++;
+        } else {
+          // Pile — but NOT at floor
+          if (f.gy >= 0 && f.gy < gridH - 1 && f.gx >= 0 && f.gx < gridW) {
+            pileGrid[f.gy][f.gx] = { char:f.char, alpha:f.alpha, born:now };
+          }
+          flakes.splice(i, 1);
+          continue;
+        }
+      }
+
       if (--f.glitchCD <= 0 && Math.random() < 0.05) {
-        f.char    = FLAKES[Math.floor(Math.random() * FLAKES.length)];
+        f.char     = FLAKES[Math.floor(Math.random() * FLAKES.length)];
         f.glitchCD = 10 + Math.floor(Math.random() * 15);
       }
     }
 
-    if (f.gy >= gridH) { flakes.splice(i, 1); continue; }
+    // Instant remove off bottom or way off sides
+    if (f.gy >= gridH || f.gx < -8 || f.gx >= gridW + 8) {
+      flakes.splice(i, 1); continue;
+    }
 
     ctx.fillStyle = `rgba(200,230,255,${f.alpha})`;
     ctx.fillText(f.char, f.gx * CELL, f.gy * CELL);
   }
 
-  // ── Draw clock ────────────────────────────────────────────────────────────
-  drawClock();
+  // ── Gale dislodges piles ──────────────────────────────────────────────
+  if (gale.active && gs > 0.4 && Math.random() < 0.04) {
+    const gy = Math.floor(Math.random() * gridH);
+    const gx = Math.floor(Math.random() * gridW);
+    const p  = pileGrid[gy]?.[gx];
+    if (p && !solidGrid[gy]?.[gx]) {
+      const tx = gx + gale.dx;
+      if (tx >= 0 && tx < gridW && !isBlocked(tx, gy)) {
+        flakes.push({ gx:tx, gy, char:p.char, alpha:p.alpha,
+          ticker:0, rate:10+Math.floor(Math.random()*8), glitchCD:0 });
+        pileGrid[gy][gx] = null;
+      }
+    }
+  }
 
-  // ── Draw + expire piled flakes (on top of clock) ─────────────────────────
+  // ── Clock digits ──────────────────────────────────────────────────────
+  drawClock(sec);
+
+  // ── Piled flakes ──────────────────────────────────────────────────────
   ctx.font      = `${CELL}px monospace`;
   ctx.textAlign = 'left';
 
@@ -243,27 +504,20 @@ function draw(now) {
     for (let gx = 0; gx < gridW; gx++) {
       const p = pileGrid[gy][gx];
       if (!p) continue;
-
       const age = now - p.born;
 
       if (age > PILE_MS) {
         pileGrid[gy][gx] = null;
-        // If there's a pile directly above, let it fall
-        if (gy > 0 && pileGrid[gy - 1][gx]) {
-          const above = pileGrid[gy - 1][gx];
-          flakes.push({
-            gx, gy: gy - 1,
-            char: above.char, alpha: above.alpha,
-            ticker: 0,
-            rate: 14 + Math.floor(Math.random() * 14),
-            glitchCD: 0,
-          });
-          pileGrid[gy - 1][gx] = null;
+        if (gy > 0 && pileGrid[gy-1][gx]) {
+          const above = pileGrid[gy-1][gx];
+          flakes.push({ gx, gy:gy-1, char:above.char, alpha:above.alpha,
+            ticker:0, rate:20+Math.floor(Math.random()*20), glitchCD:0 });
+          pileGrid[gy-1][gx] = null;
         }
         continue;
       }
 
-      const fade  = age > PILE_MS - FADE_MS
+      const fade = age > PILE_MS - FADE_MS
         ? p.alpha * (1 - (age - (PILE_MS - FADE_MS)) / FADE_MS)
         : p.alpha;
 
@@ -271,6 +525,10 @@ function draw(now) {
       ctx.fillText(p.char, gx * CELL, gy * CELL);
     }
   }
+
+  // ── Analog clock & weather overlays ───────────────────────────────────
+  drawAnalogClock(now);
+  drawWeather();
 
   requestAnimationFrame(draw);
 }
