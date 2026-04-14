@@ -35,7 +35,7 @@ const DIGITS = {
 const FLAKES  = ['*', '+', '-', '.', "'", '"', 'x'];
 const DR = 7, DC = 5;
 const CHAR_GW = DC + 1;
-const PILE_MS = 5000;
+const PILE_MS = 10000;
 const FADE_MS = 5000;
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -93,7 +93,9 @@ function spawnMs()   { return Math.round(60  / snowMultiplier()); }
 
 // ── Gale ──────────────────────────────────────────────────────────────────
 const GALE_DIRS = [
+  { dx:-1, dy:-1 }, // 10 o'clock UpLeft
   { dx:-1, dy: 0 }, //  9 o'clock Left
+  { dx: 1, dy:-1 }, //  2 o'clock UpRight
   { dx: 1, dy: 0 }, //  3 o'clock Right
 ];
 const gale = { active:false, dx:0, dy:0, strength:0, endsAt:0, fadeAt:0 };
@@ -532,13 +534,13 @@ function draw(now) {
 }
 
 requestAnimationFrame(draw);
+</script>
 
-
-<audio id="bg" src="snowfall.mp3" loop autoplay></audio>
+<audio id="bg" src="snowfall.mp3" loop></audio>
 <script>
   document.addEventListener('mousemove', () => {
     document.getElementById('bg').play();
-  }, { once:true });
+  }, { once: true });
 </script>
 </body>
 </html>
