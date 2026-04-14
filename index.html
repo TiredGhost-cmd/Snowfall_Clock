@@ -532,6 +532,13 @@ function draw(now) {
 }
 
 requestAnimationFrame(draw);
+
+
+<audio id="bg" src="snowfall.mp3" loop autoplay></audio>
+<script>
+  document.addEventListener('mousemove', () => {
+    document.getElementById('bg').play();
+  }, { once:true });
 </script>
 </body>
 </html>
