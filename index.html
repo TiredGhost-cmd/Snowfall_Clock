@@ -93,8 +93,8 @@ function spawnMs()   { return Math.round(60  / snowMultiplier()); }
 
 // ── Gale ──────────────────────────────────────────────────────────────────
 const GALE_DIRS = [
-  { dx:-1, dy: 0 }, //  9 o'clock Left
-  { dx: 1, dy: 0 }, //  3 o'clock Right
+  { dx:-1, dy: 0 }, // Left
+  { dx: 1, dy: 0 }, // Right
 ];
 const gale = { active:false, dx:0, dy:0, strength:0, endsAt:0, fadeAt:0 };
 let nextGaleCheck = 5000;
@@ -230,6 +230,14 @@ function spawnFlake() {
     ticker:   0,
     rate:     20 + Math.floor(Math.random() * 20),
     glitchCD: 0,
+    color:    (() => {
+      const r = Math.random();
+      if (r < 0.00005) return 'red';
+      if (r < 0.00010) return 'blue';
+      if (r < 0.00015) return 'teal';
+      if (r < 0.00020) return 'cyan';
+      return 'white';
+    })(),
   });
 }
 
@@ -472,7 +480,14 @@ function draw(now) {
       flakes.splice(i, 1); continue;
     }
 
-    ctx.fillStyle = `rgba(200,230,255,${f.alpha})`;
+    const cols = {
+      red:   `rgba(255, 60,  60,  ${f.alpha})`,
+      blue:  `rgba(60,  140, 255, ${f.alpha})`,
+      teal:  `rgba(40,  220, 200, ${f.alpha})`,
+      cyan:  `rgba(0,   255, 255, ${f.alpha})`,
+      white: `rgba(200, 230, 255, ${f.alpha})`,
+    };
+    ctx.fillStyle = cols[f.color] || cols.white;
     ctx.fillText(f.char, f.gx * CELL, f.gy * CELL);
   }
 
